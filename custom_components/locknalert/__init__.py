@@ -12,6 +12,8 @@ from typing import Any
 import async_timeout
 from aiohttp import ClientError, ContentTypeError
 import voluptuous as vol
+from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import aiohttp_client, config_validation as cv
@@ -65,31 +67,78 @@ CONFIG_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: Mapping[str, Any]) -> bool:
-    """Set up the LocknAlert integration from configuration.yaml."""
+    """Set up the LocknAlert integration."""
+    hass.data.setdefault(DOMAIN, {})
+    _register_services(hass)
+
     if DOMAIN not in config:
         return True
 
-    hass.data.setdefault(DOMAIN, [])
-
     for entry in config[DOMAIN]:
-        client = _LocknAlertClient(
-            hass,
-            base_url=entry[CONF_BASE_URL],
-            api_key=entry.get(CONF_API_KEY),
-            default_serial=entry.get(CONF_DEFAULT_SERIAL),
-            timeout=entry[CONF_TIMEOUT],
-        )
-        hass.data[DOMAIN].append(client)
-
-    if not hass.services.has_service(DOMAIN, SERVICE_TRIGGER_FALL):
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_TRIGGER_FALL,
-            _build_trigger_service_handler(hass),
-            schema=_fall_service_schema(),
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": config_entries.SOURCE_IMPORT},
+                data=entry,
+            )
         )
 
     return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up LocknAlert from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
+    _register_services(hass)
+
+    entry_data = _resolve_entry_data(entry)
+    client = _LocknAlertClient(
+        hass,
+        base_url=entry_data[CONF_BASE_URL],
+        api_key=entry_data.get(CONF_API_KEY),
+        default_serial=entry_data.get(CONF_DEFAULT_SERIAL),
+        timeout=entry_data[CONF_TIMEOUT],
+    )
+
+    hass.data[DOMAIN][entry.entry_id] = client
+
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    if DOMAIN in hass.data:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        if not hass.data[DOMAIN]:
+            hass.data.pop(DOMAIN)
+
+    return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload a config entry when its data changes."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _resolve_entry_data(entry: ConfigEntry) -> dict[str, Any]:
+    """Merge config entry data and options into a single mapping."""
+    data = {**entry.data, **entry.options}
+    return _ENTRY_SCHEMA(data)
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    """Register integration services if they are not already registered."""
+    if hass.services.has_service(DOMAIN, SERVICE_TRIGGER_FALL):
+        return
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_TRIGGER_FALL,
+        _build_trigger_service_handler(hass),
+        schema=_fall_service_schema(),
+    )
 
 
 def _fall_service_schema() -> vol.Schema:
@@ -111,15 +160,15 @@ def _build_trigger_service_handler(hass: HomeAssistant):
     """Build a service handler bound to the current Home Assistant instance."""
 
     async def _async_handle_service(call: ServiceCall) -> None:
-        if DOMAIN not in hass.data:
+        clients = list(hass.data.get(DOMAIN, {}).values())
+
+        if not clients:
             raise HomeAssistantError(
-                "LocknAlert is not configured. Add locknalert to configuration.yaml."
+                "LocknAlert is not configured. Add LocknAlert via the integrations UI"
+                " or configuration.yaml."
             )
 
-        if not hass.data[DOMAIN]:
-            raise HomeAssistantError("No LocknAlert servers are configured.")
-
-        tasks = [client.async_trigger_fall_alert(call.data) for client in hass.data[DOMAIN]]
+        tasks = [client.async_trigger_fall_alert(call.data) for client in clients]
         await asyncio.gather(*tasks)
 
     return _async_handle_service
