@@ -6,6 +6,7 @@ CONF_API_KEY = "api_key"
 CONF_TIMEOUT = "timeout"
 CONF_DEFAULT_SERIAL = "default_serial"
 
+DEFAULT_BASE_URL = "https://api.locknalert.co.za"
 DEFAULT_TIMEOUT = 10
 SERVICE_TRIGGER_FALL = "trigger_fall_alert"
 
@@ -17,4 +18,4 @@ ATTR_TITLE = "title"
 ATTR_MESSAGE = "message"
 ATTR_EVENT_TIME = "event_time"
 
-FALL_ENDPOINT = "/v1/homeassistant/fall_detected/"
+FALL_ENDPOINT = "/v1/homeassistant/fall_detected"
