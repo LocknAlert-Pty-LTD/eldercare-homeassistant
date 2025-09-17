@@ -4,6 +4,14 @@ This custom Home Assistant integration exposes a `locknalert.trigger_fall_alert`
 
 ## Installation
 
+### Via HACS (recommended)
+
+1. Add this repository as a [custom repository](https://hacs.xyz/docs/faq/custom_repositories/) in HACS (category **Integration**).
+2. Install **LocknAlert** from the HACS UI.
+3. Restart Home Assistant to load the new integration.
+
+### Manual installation
+
 1. Copy the `custom_components/locknalert` directory into your Home Assistant `config/custom_components` folder.
 2. Restart Home Assistant to load the new integration.
 
