@@ -25,6 +25,7 @@ from .const import (
     CONF_BASE_URL,
     CONF_DEFAULT_SERIAL,
     CONF_TIMEOUT,
+    DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
     DOMAIN,
     FALL_ENDPOINT,
@@ -36,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _ENTRY_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_BASE_URL): cv.url,
+        vol.Optional(CONF_BASE_URL, default=DEFAULT_BASE_URL): cv.url,
         vol.Optional(CONF_API_KEY): cv.string,
         vol.Optional(CONF_DEFAULT_SERIAL): cv.string,
         vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,

@@ -1,6 +1,6 @@
 # LocknAlert Home Assistant Integration
 
-This custom Home Assistant integration exposes a `locknalert.trigger_fall_alert` service that relays fall detections to the LocknAlert companion app backend. When you call the service, it POSTs to `/v1/homeassistant/fall_detected/` on your LocknAlert server with the payload expected by the platform so any connected mobile or web client receives the alert instantly.
+This custom Home Assistant integration exposes a `locknalert.trigger_fall_alert` service that relays fall detections to the LocknAlert companion app backend. When you call the service, it POSTs to `https://api.locknalert.co.za/v1/homeassistant/fall_detected` with the payload expected by the platform so any connected mobile or web client receives the alert instantly.
 
 ## Installation
 
@@ -9,24 +9,13 @@ This custom Home Assistant integration exposes a `locknalert.trigger_fall_alert`
 
 ## Configuration
 
-The integration is configured from `configuration.yaml`. You can define one or more LocknAlert servers. Each entry may also include a `default_serial` so calls to the service do not need to pass a serial explicitly.
+The integration is configured from `configuration.yaml`. The service is hard-wired to the LocknAlert cloud endpoint so you only need to provide optional authentication details or a default serial number for the device you want to target.
 
 ```yaml
 locknalert:
-  base_url: "https://api.locknalert.example"
   api_key: "YOUR_TOKEN"  # Optional: placed in the Authorization header as a Bearer token
   default_serial: "LNA-DEVICE-001"  # Optional
   timeout: 10  # Optional (seconds)
-```
-
-To target multiple independent LocknAlert servers, list multiple blocks:
-
-```yaml
-locknalert:
-  - base_url: "https://api.nursing-home-one.example"
-    default_serial: "UNIT-1"
-  - base_url: "https://api.nursing-home-two.example"
-    api_key: "secret-token"
 ```
 
 ## Service usage
