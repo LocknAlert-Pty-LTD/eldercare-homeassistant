@@ -1,0 +1,9 @@
+{
+  "domain": "locknalert",
+  "name": "LocknAlert",
+  "version": "0.1.0",
+  "documentation": "https://github.com/locknalert/eldercare-homeassistant",
+  "requirements": [],
+  "codeowners": ["@locknalert"],
+  "iot_class": "cloud_push"
+}
