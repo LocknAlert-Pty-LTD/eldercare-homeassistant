@@ -1,0 +1,6 @@
+{
+  "name": "LocknAlert",
+  "domains": ["locknalert"],
+  "country": ["ZA"],
+  "render_readme": true
+}
