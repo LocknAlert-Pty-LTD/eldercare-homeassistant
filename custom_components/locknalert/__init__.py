@@ -252,6 +252,10 @@ class _LocknAlertClient:
             return None
 
         if dt_value.tzinfo is None:
-            dt_value = dt_util.default_time_zone().localize(dt_value)
+            tz = dt_util.default_time_zone()
+            if hasattr(tz, "localize"):
+                dt_value = tz.localize(dt_value)
+            else:
+                dt_value = dt_value.replace(tzinfo=tz)
 
         return dt_util.as_utc(dt_value).isoformat()
