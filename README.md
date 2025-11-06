@@ -17,18 +17,15 @@ This custom Home Assistant integration exposes a `locknalert.trigger_fall_alert`
 
 ## Configuration
 
-The integration is configured from `configuration.yaml`. The service is hard-wired to the LocknAlert cloud endpoint so you only need to provide optional authentication details or a default serial number for the device you want to target.
+LocknAlert is configured entirely from the Home Assistant UI:
 
-```yaml
-locknalert:
-  api_key: "YOUR_TOKEN"  # Optional: placed in the Authorization header as a Bearer token
-  default_serial: "LNA-DEVICE-001"  # Optional
-  timeout: 10  # Optional (seconds)
-```
+1. Navigate to **Settings → Devices & Services → Add Integration** and search for **LocknAlert**.
+2. Enter your API key if you have one, along with the default serial number and any fallback title, message, or room name you want to reuse in service calls. The base URL and timeout fields are pre-populated with sensible defaults.
+3. After the integration is created, open its **Configure** dialog at any time to adjust the defaults used by the service.
 
 ## Service usage
 
-After reloading the configuration, call the service `locknalert.trigger_fall_alert`. Provide either `serial` or `serial_number`; all other keys are optional and are forwarded to the backend. Unknown keys are preserved so you can embed structured metadata for your automations.
+After configuring the integration, call the service `locknalert.trigger_fall_alert`. Provide either `serial` or `serial_number`; if neither is supplied, the integration falls back to the serial number configured in the integration options. `title`, `message`, and `room_name` fall back to the defaults defined in the integration settings if you omit them. Unknown keys are preserved so you can embed structured metadata for your automations.
 
 Example service call:
 

@@ -3,19 +3,19 @@ trigger_fall_alert:
   description: Send a fall-detected notification to a LocknAlert mobile app session.
   fields:
     serial:
-      description: Device serial number. Required if serial_number is not provided and no default_serial is configured.
+      description: Device serial number. Required if serial_number is not provided and no serial number is configured in the integration options.
       example: ABC123456
     serial_number:
-      description: Alternate field name for the device serial number. Required if serial is not provided and no default_serial is configured.
+      description: Alternate field name for the device serial number. Required if serial is not provided and no serial number is configured in the integration options.
       example: ABC123456
     title:
-      description: Optional notification title. Defaults to "Fall Detected" on the server.
+      description: Optional notification title. Defaults to the value configured in the integration options or "Fall Detected" on the server.
       example: Fall Detected
     message:
-      description: Optional notification message body. Defaults to "Are you ok?" on the server.
+      description: Optional notification message body. Defaults to the value configured in the integration options or "Are you ok?" on the server.
       example: Are you ok?
     room_name:
-      description: Optional name of the room where the fall was detected.
+      description: Optional name of the room where the fall was detected. Defaults to the value configured in the integration options if provided.
       example: Bedroom
     event_time:
       description: Datetime of the detected fall. Accepts ISO strings or Home Assistant datetime objects and will be normalized to UTC.
