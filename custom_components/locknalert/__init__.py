@@ -12,7 +12,6 @@ from typing import Any
 import async_timeout
 from aiohttp import ClientError, ContentTypeError
 import voluptuous as vol
-from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
@@ -21,11 +20,18 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_EVENT_TIME,
+    ATTR_MESSAGE,
+    ATTR_ROOM_NAME,
     ATTR_SERIAL,
     ATTR_SERIAL_NUMBER,
+    ATTR_TITLE,
     CONF_API_KEY,
     CONF_BASE_URL,
+    CONF_DEFAULT_MESSAGE,
+    CONF_DEFAULT_ROOM_NAME,
     CONF_DEFAULT_SERIAL,
+    CONF_DEFAULT_TITLE,
+    CONF_SERIAL_NUMBER,
     CONF_TIMEOUT,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
@@ -36,53 +42,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
-_ENTRY_SCHEMA = vol.Schema(
-    {
-        vol.Optional(CONF_BASE_URL, default=DEFAULT_BASE_URL): cv.url,
-        vol.Optional(CONF_API_KEY): cv.string,
-        vol.Optional(CONF_DEFAULT_SERIAL): cv.string,
-        vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,
-    }
-)
-
-
-def _validate_config(value: Any) -> list[dict[str, Any]]:
-    """Validate configuration and normalize to a list of server entries."""
-    if isinstance(value, Mapping):
-        value = [value]
-
-    entries = []
-    for item in cv.ensure_list(value):
-        entries.append(_ENTRY_SCHEMA(item))
-    return entries
-
-
-CONFIG_SCHEMA = vol.Schema(
-    {
-        DOMAIN: _validate_config,
-    },
-    extra=vol.ALLOW_EXTRA,
-)
-
-
 async def async_setup(hass: HomeAssistant, config: Mapping[str, Any]) -> bool:
     """Set up the LocknAlert integration."""
     hass.data.setdefault(DOMAIN, {})
-    _register_services(hass)
-
-    if DOMAIN not in config:
-        return True
-
-    for entry in config[DOMAIN]:
-        hass.async_create_task(
-            hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": config_entries.SOURCE_IMPORT},
-                data=entry,
-            )
-        )
-
     return True
 
 
@@ -96,7 +58,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         base_url=entry_data[CONF_BASE_URL],
         api_key=entry_data.get(CONF_API_KEY),
-        default_serial=entry_data.get(CONF_DEFAULT_SERIAL),
+        serial_number=entry_data.get(CONF_SERIAL_NUMBER),
+        default_title=entry_data.get(CONF_DEFAULT_TITLE),
+        default_message=entry_data.get(CONF_DEFAULT_MESSAGE),
+        default_room_name=entry_data.get(CONF_DEFAULT_ROOM_NAME),
         timeout=entry_data[CONF_TIMEOUT],
     )
 
@@ -125,7 +90,25 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 def _resolve_entry_data(entry: ConfigEntry) -> dict[str, Any]:
     """Merge config entry data and options into a single mapping."""
     data = {**entry.data, **entry.options}
-    return _ENTRY_SCHEMA(data)
+    return _normalize_entry_data(data)
+
+
+def _normalize_entry_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize entry data into canonical keys."""
+    normalized: dict[str, Any] = dict(data)
+
+    base_url = normalized.get(CONF_BASE_URL, DEFAULT_BASE_URL)
+    normalized[CONF_BASE_URL] = str(base_url).rstrip("/")
+
+    timeout = normalized.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+    normalized[CONF_TIMEOUT] = int(timeout)
+
+    serial = normalized.get(CONF_SERIAL_NUMBER) or normalized.get(CONF_DEFAULT_SERIAL)
+    if serial:
+        normalized[CONF_SERIAL_NUMBER] = str(serial)
+    normalized.pop(CONF_DEFAULT_SERIAL, None)
+
+    return normalized
 
 
 def _register_services(hass: HomeAssistant) -> None:
@@ -164,8 +147,7 @@ def _build_trigger_service_handler(hass: HomeAssistant):
 
         if not clients:
             raise HomeAssistantError(
-                "LocknAlert is not configured. Add LocknAlert via the integrations UI"
-                " or configuration.yaml."
+                "LocknAlert is not configured. Add LocknAlert via the integrations UI."
             )
 
         tasks = [client.async_trigger_fall_alert(call.data) for client in clients]
@@ -183,27 +165,46 @@ class _LocknAlertClient:
         *,
         base_url: str,
         api_key: str | None,
-        default_serial: str | None,
+        serial_number: str | None,
+        default_title: str | None,
+        default_message: str | None,
+        default_room_name: str | None,
         timeout: int,
     ) -> None:
         self._session = aiohttp_client.async_get_clientsession(hass)
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._default_serial = default_serial
+        self._serial_number = serial_number
+        self._default_title = default_title
+        self._default_message = default_message
+        self._default_room_name = default_room_name
         self._timeout = timeout
 
     async def async_trigger_fall_alert(self, data: Mapping[str, Any]) -> None:
         """Send a fall alert payload to the LocknAlert server."""
         payload: dict[str, Any] = dict(data)
 
-        serial = payload.get(ATTR_SERIAL) or payload.get(ATTR_SERIAL_NUMBER) or self._default_serial
+        serial = (
+            payload.get(ATTR_SERIAL)
+            or payload.get(ATTR_SERIAL_NUMBER)
+            or self._serial_number
+        )
         if not serial:
             raise HomeAssistantError(
-                "Call must include 'serial' or 'serial_number', or configure default_serial."
+                "Call must include 'serial' or 'serial_number', or configure a serial number in the integration options."
             )
 
-        if ATTR_SERIAL not in payload and ATTR_SERIAL_NUMBER not in payload:
+        if ATTR_SERIAL not in payload:
             payload[ATTR_SERIAL] = serial
+        if ATTR_SERIAL_NUMBER not in payload:
+            payload[ATTR_SERIAL_NUMBER] = serial
+
+        if self._default_title and ATTR_TITLE not in payload:
+            payload[ATTR_TITLE] = self._default_title
+        if self._default_message and ATTR_MESSAGE not in payload:
+            payload[ATTR_MESSAGE] = self._default_message
+        if self._default_room_name and ATTR_ROOM_NAME not in payload:
+            payload[ATTR_ROOM_NAME] = self._default_room_name
 
         if ATTR_EVENT_TIME in payload:
             normalized_time = self._normalize_event_time(payload[ATTR_EVENT_TIME])
