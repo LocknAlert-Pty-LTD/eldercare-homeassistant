@@ -5,6 +5,10 @@ CONF_BASE_URL = "base_url"
 CONF_API_KEY = "api_key"
 CONF_TIMEOUT = "timeout"
 CONF_DEFAULT_SERIAL = "default_serial"
+CONF_SERIAL_NUMBER = "serial_number"
+CONF_DEFAULT_TITLE = "default_title"
+CONF_DEFAULT_MESSAGE = "default_message"
+CONF_DEFAULT_ROOM_NAME = "default_room_name"
 
 DEFAULT_BASE_URL = "https://api.locknalert.co.za"
 DEFAULT_TIMEOUT = 10
