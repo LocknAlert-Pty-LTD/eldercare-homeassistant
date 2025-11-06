@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -30,11 +31,27 @@ def _entry_title(data: dict[str, Any]) -> str:
     return data.get(CONF_SERIAL_NUMBER) or data.get(CONF_DEFAULT_SERIAL) or data[CONF_BASE_URL]
 
 
-def _sanitize_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
-    """Normalize user input for storage."""
-    data: dict[str, Any] = dict(user_input)
-    data[CONF_BASE_URL] = data[CONF_BASE_URL].rstrip("/")
-    data[CONF_TIMEOUT] = int(data[CONF_TIMEOUT])
+def _sanitize_user_input(
+    user_input: Mapping[str, Any],
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize user supplied values and merge them with defaults."""
+
+    combined: dict[str, Any] = {}
+    if defaults:
+        combined.update(defaults)
+    combined.update(user_input)
+
+    sanitized: dict[str, Any] = {}
+
+    base_url = combined.get(CONF_BASE_URL) or DEFAULT_BASE_URL
+    sanitized[CONF_BASE_URL] = str(base_url).rstrip("/")
+
+    timeout_value = combined.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+    try:
+        sanitized[CONF_TIMEOUT] = int(timeout_value)
+    except (TypeError, ValueError):
+        sanitized[CONF_TIMEOUT] = DEFAULT_TIMEOUT
 
     optional_keys = (
         CONF_API_KEY,
@@ -44,10 +61,20 @@ def _sanitize_user_input(user_input: dict[str, Any]) -> dict[str, Any]:
         CONF_DEFAULT_ROOM_NAME,
     )
     for key in optional_keys:
-        if not data.get(key):
-            data.pop(key, None)
+        value = combined.get(key)
+        if value:
+            sanitized[key] = value
 
-    return data
+    # Preserve any additional keys that are not explicitly handled.
+    for key, value in combined.items():
+        if key in sanitized or key in optional_keys or key in (
+            CONF_BASE_URL,
+            CONF_TIMEOUT,
+        ):
+            continue
+        sanitized[key] = value
+
+    return sanitized
 
 
 def _build_data_schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -127,12 +154,12 @@ class LocknAlertOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle the main options step."""
-        if user_input is not None:
-            cleaned = _sanitize_user_input(user_input)
-            return self.async_create_entry(data=cleaned)
-
         defaults: dict[str, Any] = {**self.config_entry.data, **self.config_entry.options}
+        if user_input is not None:
+            cleaned = _sanitize_user_input(user_input, defaults)
+            return self.async_create_entry(data=cleaned)
+        merged_defaults = _sanitize_user_input({}, defaults)
         return self.async_show_form(
             step_id="user",
-            data_schema=_build_data_schema(defaults),
+            data_schema=_build_data_schema(merged_defaults),
         )
