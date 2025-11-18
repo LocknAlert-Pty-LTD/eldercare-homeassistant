@@ -9,7 +9,6 @@ import json
 import logging
 from typing import Any
 
-import async_timeout
 from aiohttp import ClientError, ContentTypeError
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -219,7 +218,7 @@ class _LocknAlertClient:
         _LOGGER.debug("Sending LocknAlert fall alert to %s with payload %s", url, payload)
 
         try:
-            async with async_timeout.timeout(self._timeout):
+            async with asyncio.timeout(self._timeout):
                 response = await self._session.post(url, json=payload, headers=headers)
         except asyncio.TimeoutError as err:
             raise HomeAssistantError(
