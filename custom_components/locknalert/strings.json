@@ -1,0 +1,117 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sign in to LocknAlert",
+        "description": "Choose how you sign in to LocknAlert Eldercare. Your browser will open the LocknAlert sign-in page; Home Assistant never sees your password.",
+        "menu_options": {
+          "google": "Sign in with Google",
+          "locknalert_account": "Sign in with my LocknAlert account"
+        }
+      },
+      "serial": {
+        "title": "Link your household",
+        "description": "Enter the serial number printed on your LocknAlert bridge. Your account must be an approved member of that household. Home Assistant will show your own alerts plus the alerts the bridge raises for the household. Other household members can add LocknAlert again with their own account to show theirs.",
+        "data": {
+          "serial": "Bridge serial number"
+        },
+        "data_description": {
+          "serial": "For example LNA-00042."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "Home Assistant's access to {name} has ended (for example after a password change, or because it was disconnected). Sign in again with the same LocknAlert account to restore it."
+      }
+    },
+    "error": {
+      "invalid_serial": "That doesn't look like a bridge serial number. Use the letters, digits and dashes printed on the bridge."
+    },
+    "abort": {
+      "my_home_assistant_required": "LocknAlert sign-in needs the My Home Assistant integration (part of the default configuration). Enable it and try again.",
+      "serial_mismatch": "The sign-in was for a different household than the bridge serial entered.",
+      "cannot_connect": "Couldn't reach LocknAlert. Check your internet connection and try again.",
+      "already_configured": "Your alerts for this household are already linked.",
+      "reauth_successful": "Signed in again successfully.",
+      "oauth_unauthorized": "LocknAlert refused the sign-in. Make sure your account is an approved member of the household and try again.",
+      "oauth_failed": "Couldn't complete the LocknAlert sign-in. Please try again.",
+      "oauth_error": "LocknAlert returned an invalid sign-in response.",
+      "oauth_timeout": "The LocknAlert sign-in timed out. Please try again.",
+      "user_rejected_authorize": "Access wasn't allowed: {error}.",
+      "missing_configuration": "The LocknAlert sign-in isn't available. Restart Home Assistant and try again.",
+      "oauth_implementation_unavailable": "The LocknAlert sign-in isn't available right now. Please try again later.",
+      "authorize_url_timeout": "Timed out preparing the LocknAlert sign-in.",
+      "no_url_available": "No URL is available for Home Assistant. See {docs_url}.",
+      "wrong_account": "You signed in with a different LocknAlert account. Each entry shows one person's alerts, so sign in as the same person, or add LocknAlert again to link another person."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "active_alert": {
+        "name": "Active alert"
+      },
+      "fall": {
+        "name": "Fall alert"
+      },
+      "help": {
+        "name": "Help requested"
+      },
+      "emergency": {
+        "name": "Emergency"
+      },
+      "vitals": {
+        "name": "Vitals alert"
+      },
+      "heart_rate": {
+        "name": "Heart rate alert"
+      },
+      "spo2": {
+        "name": "Blood oxygen alert"
+      },
+      "hrv": {
+        "name": "HRV alert"
+      },
+      "respiration": {
+        "name": "Breathing alert"
+      },
+      "irregular_rhythm": {
+        "name": "Irregular rhythm alert"
+      },
+      "combined_vitals": {
+        "name": "Combined vitals alert"
+      },
+      "routine": {
+        "name": "Unusual routine alert"
+      },
+      "stillness": {
+        "name": "Stillness alert"
+      },
+      "watch_off": {
+        "name": "Watch off"
+      },
+      "family_check": {
+        "name": "Family check-in"
+      }
+    },
+    "sensor": {
+      "open_alert_count": {
+        "name": "Open alerts",
+        "unit_of_measurement": "alerts"
+      }
+    }
+  },
+  "exceptions": {
+    "auth_failed": {
+      "message": "LocknAlert no longer accepts Home Assistant's access. Sign in again."
+    },
+    "update_failed": {
+      "message": "Couldn't read the household status from LocknAlert."
+    },
+    "serial_mismatch": {
+      "message": "LocknAlert returned the status of a different household."
+    },
+    "implementation_unavailable": {
+      "message": "The LocknAlert sign-in isn't available yet."
+    }
+  }
+}

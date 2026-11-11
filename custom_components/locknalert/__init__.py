@@ -1,261 +1,138 @@
-"""LocknAlert Home Assistant integration."""
+"""The LocknAlert integration: Eldercare household alerts as binary sensors."""
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Mapping
-from datetime import datetime
-import json
 import logging
-from typing import Any
 
-from aiohttp import ClientError, ContentTypeError
-import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import aiohttp_client, config_validation as cv
-from homeassistant.util import dt as dt_util
-
-from .const import (
-    ATTR_EVENT_TIME,
-    ATTR_MESSAGE,
-    ATTR_ROOM_NAME,
-    ATTR_SERIAL,
-    ATTR_SERIAL_NUMBER,
-    ATTR_TITLE,
-    CONF_API_KEY,
-    CONF_BASE_URL,
-    CONF_DEFAULT_MESSAGE,
-    CONF_DEFAULT_ROOM_NAME,
-    CONF_DEFAULT_SERIAL,
-    CONF_DEFAULT_TITLE,
-    CONF_SERIAL_NUMBER,
-    CONF_TIMEOUT,
-    DEFAULT_BASE_URL,
-    DEFAULT_TIMEOUT,
-    DOMAIN,
-    FALL_ENDPOINT,
-    SERVICE_TRIGGER_FALL,
+from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady, ImplementationUnavailableError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.config_entry_oauth2_flow import (
+    OAuth2Session,
+    async_get_config_entry_implementation,
+    async_register_implementation,
 )
+from homeassistant.helpers.typing import ConfigType
+
+from .api import LocknAlertApiClient
+from .const import CONF_PERSON_REF, CONF_SERIAL, DOMAIN
+from .coordinator import LocknAlertConfigEntry, LocknAlertCoordinator
+from .oauth import LocknAlertOAuth2Implementation, async_revoke_token
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup(hass: HomeAssistant, config: Mapping[str, Any]) -> bool:
-    """Set up the LocknAlert integration."""
-    hass.data.setdefault(DOMAIN, {})
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the LocknAlert sign-in for config flows.
+
+    Args:
+        hass: The Home Assistant instance.
+        config: The YAML configuration (unused: setup is UI only).
+
+    Returns:
+        True.
+    """
+    del config
+    async_register_implementation(hass, DOMAIN, LocknAlertOAuth2Implementation(hass))
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up LocknAlert from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
-    _register_services(hass)
+async def async_setup_entry(hass: HomeAssistant, entry: LocknAlertConfigEntry) -> bool:
+    """Set up a linked household.
 
-    entry_data = _resolve_entry_data(entry)
-    client = _LocknAlertClient(
-        hass,
-        base_url=entry_data[CONF_BASE_URL],
-        api_key=entry_data.get(CONF_API_KEY),
-        serial_number=entry_data.get(CONF_SERIAL_NUMBER),
-        default_title=entry_data.get(CONF_DEFAULT_TITLE),
-        default_message=entry_data.get(CONF_DEFAULT_MESSAGE),
-        default_room_name=entry_data.get(CONF_DEFAULT_ROOM_NAME),
-        timeout=entry_data[CONF_TIMEOUT],
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry.
+
+    Returns:
+        True when set up.
+
+    Raises:
+        ConfigEntryNotReady: The sign-in implementation isn't available yet.
+    """
+    try:
+        implementation = await async_get_config_entry_implementation(hass, entry)
+    except ImplementationUnavailableError as err:
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN, translation_key="implementation_unavailable"
+        ) from err
+    oauth_session = OAuth2Session(hass, entry, implementation)
+
+    async def access_token() -> str:
+        """Return a valid access token, refreshing it first when needed.
+
+        Returns:
+            The access token.
+        """
+        await oauth_session.async_ensure_token_valid()
+        return str(oauth_session.token["access_token"])
+
+    client = LocknAlertApiClient(async_get_clientsession(hass), access_token)
+    coordinator = LocknAlertCoordinator(
+        hass, entry, client, entry.data[CONF_SERIAL], entry.data[CONF_PERSON_REF]
     )
-
-    hass.data[DOMAIN][entry.entry_id] = client
-
-    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
-
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Real-time updates over the push socket (cancelled when the entry unloads)
+    _ = entry.async_create_background_task(
+        hass, coordinator.async_run_push(), name=f"{DOMAIN} push {entry.entry_id}"
+    )
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    if DOMAIN in hass.data:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
+async def async_unload_entry(hass: HomeAssistant, entry: LocknAlertConfigEntry) -> bool:
+    """Unload a linked household.
 
-    return True
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry.
 
-
-async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload a config entry when its data changes."""
-    await hass.config_entries.async_reload(entry.entry_id)
+    Returns:
+        True when unloaded.
+    """
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-def _resolve_entry_data(entry: ConfigEntry) -> dict[str, Any]:
-    """Merge config entry data and options into a single mapping."""
-    data = {**entry.data, **entry.options}
-    return _normalize_entry_data(data)
+async def async_remove_entry(hass: HomeAssistant, entry: LocknAlertConfigEntry) -> None:
+    """Revoke LocknAlert's grant when the integration is removed.
+
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry being removed.
+    """
+    token = entry.data.get("token")
+    refresh_token = token.get("refresh_token") if isinstance(token, dict) else None
+    if isinstance(refresh_token, str) and refresh_token:
+        await async_revoke_token(hass, refresh_token)
 
 
-def _normalize_entry_data(data: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize entry data into canonical keys."""
-    normalized: dict[str, Any] = dict(data)
+async def async_migrate_entry(
+    hass: HomeAssistant, entry: LocknAlertConfigEntry
+) -> bool:
+    """Migrate an old config entry.
 
-    base_url = normalized.get(CONF_BASE_URL, DEFAULT_BASE_URL)
-    normalized[CONF_BASE_URL] = str(base_url).rstrip("/")
+    Version 1 entries used a shared API key and no sign-in. They can't be
+    converted to a household-scoped grant, so they must be added again.
 
-    timeout = normalized.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-    normalized[CONF_TIMEOUT] = int(timeout)
+    Args:
+        hass: The Home Assistant instance.
+        entry: The config entry.
 
-    serial = normalized.get(CONF_SERIAL_NUMBER) or normalized.get(CONF_DEFAULT_SERIAL)
-    if serial:
-        normalized[CONF_SERIAL_NUMBER] = str(serial)
-    normalized.pop(CONF_DEFAULT_SERIAL, None)
-
-    return normalized
-
-
-def _register_services(hass: HomeAssistant) -> None:
-    """Register integration services if they are not already registered."""
-    if hass.services.has_service(DOMAIN, SERVICE_TRIGGER_FALL):
-        return
-
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_TRIGGER_FALL,
-        _build_trigger_service_handler(hass),
-        schema=_fall_service_schema(),
-    )
-
-
-def _fall_service_schema() -> vol.Schema:
-    """Return the service schema for triggering a fall alert."""
-    return vol.Schema(
-        {
-            vol.Optional(ATTR_SERIAL): cv.string,
-            vol.Optional(ATTR_SERIAL_NUMBER): cv.string,
-            vol.Optional("title"): cv.string,
-            vol.Optional("message"): cv.string,
-            vol.Optional("room_name"): cv.string,
-            vol.Optional(ATTR_EVENT_TIME): vol.Any(cv.datetime, cv.string),
-        },
-        extra=vol.ALLOW_EXTRA,
-    )
-
-
-def _build_trigger_service_handler(hass: HomeAssistant):
-    """Build a service handler bound to the current Home Assistant instance."""
-
-    async def _async_handle_service(call: ServiceCall) -> None:
-        clients = list(hass.data.get(DOMAIN, {}).values())
-
-        if not clients:
-            raise HomeAssistantError(
-                "LocknAlert is not configured. Add LocknAlert via the integrations UI."
-            )
-
-        tasks = [client.async_trigger_fall_alert(call.data) for client in clients]
-        await asyncio.gather(*tasks)
-
-    return _async_handle_service
-
-
-class _LocknAlertClient:
-    """Handle interactions with a LocknAlert server instance."""
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        *,
-        base_url: str,
-        api_key: str | None,
-        serial_number: str | None,
-        default_title: str | None,
-        default_message: str | None,
-        default_room_name: str | None,
-        timeout: int,
-    ) -> None:
-        self._session = aiohttp_client.async_get_clientsession(hass)
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._serial_number = serial_number
-        self._default_title = default_title
-        self._default_message = default_message
-        self._default_room_name = default_room_name
-        self._timeout = timeout
-
-    async def async_trigger_fall_alert(self, data: Mapping[str, Any]) -> None:
-        """Send a fall alert payload to the LocknAlert server."""
-        payload: dict[str, Any] = dict(data)
-
-        serial = (
-            payload.get(ATTR_SERIAL)
-            or payload.get(ATTR_SERIAL_NUMBER)
-            or self._serial_number
+    Returns:
+        False for version 1 entries (they must be removed and added again).
+    """
+    del hass
+    if entry.version == 1:
+        _LOGGER.error(
+            "This LocknAlert entry was created by an older version that used an "
+            "API key. Remove it and add LocknAlert again to sign in securely"
         )
-        if not serial:
-            raise HomeAssistantError(
-                "Call must include 'serial' or 'serial_number', or configure a serial number in the integration options."
-            )
-
-        if ATTR_SERIAL not in payload:
-            payload[ATTR_SERIAL] = serial
-        if ATTR_SERIAL_NUMBER not in payload:
-            payload[ATTR_SERIAL_NUMBER] = serial
-
-        if self._default_title and ATTR_TITLE not in payload:
-            payload[ATTR_TITLE] = self._default_title
-        if self._default_message and ATTR_MESSAGE not in payload:
-            payload[ATTR_MESSAGE] = self._default_message
-        if self._default_room_name and ATTR_ROOM_NAME not in payload:
-            payload[ATTR_ROOM_NAME] = self._default_room_name
-
-        if ATTR_EVENT_TIME in payload:
-            normalized_time = self._normalize_event_time(payload[ATTR_EVENT_TIME])
-            if normalized_time is not None:
-                payload[ATTR_EVENT_TIME] = normalized_time
-
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
-        url = f"{self._base_url}{FALL_ENDPOINT}"
-        _LOGGER.debug("Sending LocknAlert fall alert to %s with payload %s", url, payload)
-
-        try:
-            async with asyncio.timeout(self._timeout):
-                response = await self._session.post(url, json=payload, headers=headers)
-        except asyncio.TimeoutError as err:
-            raise HomeAssistantError(
-                "Timeout communicating with the LocknAlert server"
-            ) from err
-        except ClientError as err:
-            raise HomeAssistantError("Error communicating with the LocknAlert server") from err
-
-        try:
-            response_data = await response.json(content_type=None)
-        except (ContentTypeError, json.JSONDecodeError):
-            response_data = await response.text()
-
-        if response.status >= 400:
-            raise HomeAssistantError(
-                f"LocknAlert server returned HTTP {response.status}: {response_data}"
-            )
-
-        _LOGGER.debug("LocknAlert server response: %s", response_data)
-
-    def _normalize_event_time(self, value: Any) -> str | None:
-        """Normalize event time to an ISO formatted UTC string."""
-        dt_value: datetime | None
-        if isinstance(value, datetime):
-            dt_value = value
-        else:
-            dt_value = dt_util.parse_datetime(str(value))
-
-        if dt_value is None:
-            _LOGGER.warning("Could not parse event_time value '%s'; sending as-is", value)
-            return None
-
-        if dt_value.tzinfo is None:
-            tz = dt_util.default_time_zone()
-            if hasattr(tz, "localize"):
-                dt_value = tz.localize(dt_value)
-            else:
-                dt_value = dt_value.replace(tzinfo=tz)
-
-        return dt_util.as_utc(dt_value).isoformat()
+        return False
+    return True

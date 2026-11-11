@@ -1,0 +1,24 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "active_alert": { "default": "mdi:shield-check", "state": { "on": "mdi:alert" } },
+      "fall": { "default": "mdi:human", "state": { "on": "mdi:human-handsdown" } },
+      "help": { "default": "mdi:hand-back-left-outline", "state": { "on": "mdi:hand-back-left" } },
+      "emergency": { "default": "mdi:shield-check", "state": { "on": "mdi:alarm-light" } },
+      "vitals": { "default": "mdi:heart-pulse" },
+      "heart_rate": { "default": "mdi:heart-pulse" },
+      "spo2": { "default": "mdi:water-percent" },
+      "hrv": { "default": "mdi:chart-bell-curve" },
+      "respiration": { "default": "mdi:lungs" },
+      "irregular_rhythm": { "default": "mdi:heart-flash" },
+      "combined_vitals": { "default": "mdi:clipboard-pulse" },
+      "routine": { "default": "mdi:calendar-clock" },
+      "stillness": { "default": "mdi:sleep" },
+      "watch_off": { "default": "mdi:watch", "state": { "on": "mdi:watch-off" } },
+      "family_check": { "default": "mdi:account-group" }
+    },
+    "sensor": {
+      "open_alert_count": { "default": "mdi:counter" }
+    }
+  }
+}

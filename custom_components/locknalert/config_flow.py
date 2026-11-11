@@ -1,165 +1,321 @@
-"""Config flow for the LocknAlert integration."""
+"""Config flow for LocknAlert: sign in (Google or LocknAlert account), link a bridge.
+
+Steps:
+
+1. ``user``: choose how to sign in (Google, or a LocknAlert email and password).
+2. ``serial``: the bridge serial of the household to link.
+3. The browser opens the LocknAlert sign-in (with two-factor) and consent page;
+   access is granted only to that household, and only if the account is an
+   approved member of it.
+4. The returned token is checked against the household before the entry is created.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+import logging
+from typing import Any, override
 
-import voluptuous as vol
-from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import callback
-from homeassistant.helpers import config_validation as cv
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.config_entry_oauth2_flow import AbstractOAuth2FlowHandler
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
+import probatio
 
+from .api import (
+    HouseholdStatus,
+    LocknAlertApiClient,
+    LocknAlertApiError,
+    LocknAlertAuthError,
+)
 from .const import (
-    CONF_API_KEY,
-    CONF_BASE_URL,
-    CONF_DEFAULT_MESSAGE,
-    CONF_DEFAULT_ROOM_NAME,
-    CONF_DEFAULT_SERIAL,
-    CONF_DEFAULT_TITLE,
-    CONF_SERIAL_NUMBER,
-    CONF_TIMEOUT,
-    DEFAULT_BASE_URL,
-    DEFAULT_TIMEOUT,
+    CONF_PERSON_NAME,
+    CONF_PERSON_REF,
+    CONF_SERIAL,
     DOMAIN,
+    SIGN_IN_EMAIL,
+    SIGN_IN_GOOGLE,
+    entry_unique_id,
+    normalize_serial,
+)
+from .oauth import async_revoke_token
+
+STEP_GOOGLE = "google"
+STEP_ACCOUNT = "locknalert_account"
+
+
+def _entry_title(status: HouseholdStatus) -> str:
+    """Return the entry (and device) name for a person in a household.
+
+    Args:
+        status: The first status read with the new token.
+
+    Returns:
+        e.g. "Mary (LNA-00042)", or "LocknAlert LNA-00042 (q3J7)" when the
+        person hasn't set a first name (the short id tells entries apart).
+    """
+    if status.person_name:
+        return f"{status.person_name} ({status.serial})"
+    return f"LocknAlert {status.serial} ({status.person_ref[:4]})"
+
+
+SERIAL_SCHEMA = probatio.Schema(
+    {
+        probatio.Required(CONF_SERIAL): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.TEXT, autocomplete="off")
+        )
+    }
 )
 
 
-def _entry_title(data: dict[str, Any]) -> str:
-    """Return a title for the config entry."""
-    return data.get(CONF_SERIAL_NUMBER) or data.get(CONF_DEFAULT_SERIAL) or data[CONF_BASE_URL]
+class LocknAlertFlowHandler(AbstractOAuth2FlowHandler, domain=DOMAIN):
+    """Handle LocknAlert sign-in and household linking."""
 
+    DOMAIN = DOMAIN
+    # Version 2: OAuth sign-in (version 1 used a shared API key)
+    VERSION = 2
 
-def _sanitize_user_input(
-    user_input: Mapping[str, Any],
-    defaults: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Normalize user supplied values and merge them with defaults."""
+    def __init__(self) -> None:
+        """Initialise the flow."""
+        super().__init__()
+        self._serial: str | None = None
+        self._sign_in_method = SIGN_IN_GOOGLE
 
-    combined: dict[str, Any] = {}
-    if defaults:
-        combined.update(defaults)
-    combined.update(user_input)
+    @property
+    @override
+    def logger(self) -> logging.Logger:
+        """Return the flow's logger."""
+        return logging.getLogger(__name__)
 
-    sanitized: dict[str, Any] = {}
+    @property
+    @override
+    def extra_authorize_data(self) -> dict[str, str]:
+        """Add the household and sign-in method to the authorize URL."""
+        if self._serial is None:  # pragma: no cover - set before authorizing
+            msg = "The bridge serial must be known before signing in"
+            raise RuntimeError(msg)
+        return {"bridge_serial": self._serial, "method": self._sign_in_method}
 
-    base_url = combined.get(CONF_BASE_URL) or DEFAULT_BASE_URL
-    sanitized[CONF_BASE_URL] = str(base_url).rstrip("/")
+    @override
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask how the person wants to sign in.
 
-    timeout_value = combined.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-    try:
-        sanitized[CONF_TIMEOUT] = int(timeout_value)
-    except (TypeError, ValueError):
-        sanitized[CONF_TIMEOUT] = DEFAULT_TIMEOUT
+        Args:
+            user_input: Unused (the menu answers with its own step).
 
-    optional_keys = (
-        CONF_API_KEY,
-        CONF_SERIAL_NUMBER,
-        CONF_DEFAULT_TITLE,
-        CONF_DEFAULT_MESSAGE,
-        CONF_DEFAULT_ROOM_NAME,
-    )
-    for key in optional_keys:
-        value = combined.get(key)
-        if value:
-            sanitized[key] = value
+        Returns:
+            The sign-in method menu, or an abort.
+        """
+        # LocknAlert only accepts My Home Assistant as the sign-in redirect
+        if "my" not in self.hass.config.components:
+            return self.async_abort(reason="my_home_assistant_required")
+        return self.async_show_menu(
+            step_id="user", menu_options=[STEP_GOOGLE, STEP_ACCOUNT]
+        )
 
-    # Preserve any additional keys that are not explicitly handled.
-    for key, value in combined.items():
-        if key in sanitized or key in optional_keys or key in (
-            CONF_BASE_URL,
-            CONF_TIMEOUT,
-        ):
-            continue
-        sanitized[key] = value
+    async def async_step_google(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sign in with Google.
 
-    return sanitized
+        Args:
+            user_input: Unused.
 
+        Returns:
+            The next step.
+        """
+        del user_input
+        self._sign_in_method = SIGN_IN_GOOGLE
+        return await self.async_step_serial()
 
-def _build_data_schema(defaults: dict[str, Any]) -> vol.Schema:
-    """Build the schema used for both configuration and options flows."""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_BASE_URL,
-                default=defaults.get(CONF_BASE_URL, DEFAULT_BASE_URL),
-            ): cv.url,
-            vol.Optional(
-                CONF_API_KEY,
-                default=defaults.get(CONF_API_KEY, ""),
-            ): cv.string,
-            vol.Optional(
-                CONF_SERIAL_NUMBER,
-                default=defaults.get(CONF_SERIAL_NUMBER, ""),
-            ): cv.string,
-            vol.Optional(
-                CONF_DEFAULT_TITLE,
-                default=defaults.get(CONF_DEFAULT_TITLE, ""),
-            ): cv.string,
-            vol.Optional(
-                CONF_DEFAULT_MESSAGE,
-                default=defaults.get(CONF_DEFAULT_MESSAGE, ""),
-            ): cv.string,
-            vol.Optional(
-                CONF_DEFAULT_ROOM_NAME,
-                default=defaults.get(CONF_DEFAULT_ROOM_NAME, ""),
-            ): cv.string,
-            vol.Required(
-                CONF_TIMEOUT,
-                default=defaults.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1)),
-        }
-    )
+    async def async_step_locknalert_account(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Sign in with a LocknAlert email and password.
 
+        Args:
+            user_input: Unused.
 
-class LocknAlertConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for LocknAlert."""
+        Returns:
+            The next step.
+        """
+        del user_input
+        self._sign_in_method = SIGN_IN_EMAIL
+        return await self.async_step_serial()
 
-    VERSION = 1
+    async def async_step_serial(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the bridge serial (kept from the entry when re-authenticating).
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
-        """Handle the initial step of the config flow."""
+        Args:
+            user_input: The submitted form, if any.
+
+        Returns:
+            The form, or the browser sign-in.
+        """
+        if self.source == SOURCE_REAUTH and self._serial is not None:
+            return await self.async_step_pick_implementation()
+
+        errors: dict[str, str] = {}
         if user_input is not None:
-            cleaned = _sanitize_user_input(user_input)
-            await self.async_set_unique_id(cleaned[CONF_BASE_URL])
-            self._abort_if_unique_id_configured()
-            return self.async_create_entry(
-                title=_entry_title(cleaned),
-                data=cleaned,
+            serial = normalize_serial(str(user_input[CONF_SERIAL]))
+            if serial is None:
+                errors[CONF_SERIAL] = "invalid_serial"
+            else:
+                # Several people may link the same household (one entry each),
+                # so duplicates are only known once the person has signed in
+                self._serial = serial
+                return await self.async_step_pick_implementation()
+
+        return self.async_show_form(
+            step_id="serial",
+            data_schema=self.add_suggested_values_to_schema(
+                SERIAL_SCHEMA, user_input or {}
+            ),
+            errors=errors,
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start re-authentication for an existing household.
+
+        Args:
+            entry_data: The entry's stored data.
+
+        Returns:
+            The confirmation step.
+        """
+        self._serial = str(entry_data[CONF_SERIAL])
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Explain that the person must sign in again.
+
+        Args:
+            user_input: The (empty) confirmation, if submitted.
+
+        Returns:
+            The confirmation form, or the sign-in method menu.
+        """
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reauth_confirm",
+                description_placeholders={"serial": self._serial or ""},
             )
+        return await self.async_step_user()
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_build_data_schema({}),
+    @override
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
+        """Check the new token against the household, then create or update the entry.
+
+        Args:
+            data: The implementation domain and the token.
+
+        Returns:
+            The created entry, the reauth result, or an abort.
+        """
+        serial = self._serial
+        token: dict[str, Any] = data["token"]
+        if serial is None:  # pragma: no cover - set before authorizing
+            return self.async_abort(reason="oauth_error")
+
+        status, reason = await self._async_check_token(token, serial)
+        unique_id = (
+            entry_unique_id(serial, status.person_ref) if status is not None else None
         )
+        if unique_id is not None:
+            reason = self._duplicate_or_wrong_person(unique_id)
+        if status is None or unique_id is None or reason is not None:
+            # Nothing will store this token: revoke it so no grant is left behind
+            await self._async_discard(token)
+            return self.async_abort(reason=reason or "oauth_error")
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> config_entries.OptionsFlow:
-        """Return the options flow handler for this integration."""
-        return LocknAlertOptionsFlowHandler(config_entry)
+        await self.async_set_unique_id(unique_id)
+        entry_data = {
+            **data,
+            CONF_SERIAL: serial,
+            CONF_PERSON_REF: status.person_ref,
+            CONF_PERSON_NAME: status.person_name,
+        }
+        if self.source == SOURCE_REAUTH:
+            reauth_entry = self._get_reauth_entry()
+            old_token = reauth_entry.data.get("token")
+            result = self.async_update_reload_and_abort(reauth_entry, data=entry_data)
+            # The previous grant is replaced: make sure it can't be used again
+            if isinstance(old_token, Mapping):
+                await self._async_discard(old_token)
+            return result
+        return self.async_create_entry(title=_entry_title(status), data=entry_data)
 
+    def _duplicate_or_wrong_person(self, unique_id: str) -> str | None:
+        """Check the signed-in person against existing entries.
 
-class LocknAlertOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle LocknAlert options."""
+        Args:
+            unique_id: The entry unique id for this person and household.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize the options flow handler."""
-        self.config_entry = config_entry
+        Returns:
+            "wrong_account" when re-authenticating as someone else,
+            "already_configured" when this person already linked this
+            household, otherwise None.
+        """
+        if self.source == SOURCE_REAUTH:
+            # An entry holds one person's alerts: only that person may renew it
+            reauth_unique_id = self._get_reauth_entry().unique_id
+            return None if reauth_unique_id == unique_id else "wrong_account"
+        if self.hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, unique_id):
+            return "already_configured"
+        return None
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None):
-        """Handle the first step of the options flow."""
-        return await self.async_step_user(user_input)
+    async def _async_check_token(
+        self, token: Mapping[str, Any], serial: str
+    ) -> tuple[HouseholdStatus | None, str | None]:
+        """Read the status with a new token to prove it works for that household.
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
-        """Handle the main options step."""
-        defaults: dict[str, Any] = {**self.config_entry.data, **self.config_entry.options}
-        if user_input is not None:
-            cleaned = _sanitize_user_input(user_input, defaults)
-            return self.async_create_entry(data=cleaned)
-        merged_defaults = _sanitize_user_input({}, defaults)
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_build_data_schema(merged_defaults),
-        )
+        Args:
+            token: The token response.
+            serial: The bridge serial the person entered.
+
+        Returns:
+            The status and None when the token reads that household, else
+            None and the abort reason.
+        """
+
+        async def access_token() -> str:
+            """Return the token just issued.
+
+            Returns:
+                The access token.
+            """
+            return str(token["access_token"])
+
+        client = LocknAlertApiClient(async_get_clientsession(self.hass), access_token)
+        try:
+            status = await client.async_get_status()
+        except LocknAlertAuthError:
+            return None, "oauth_unauthorized"
+        except LocknAlertApiError:
+            return None, "cannot_connect"
+        # The grant must be for the household the person asked to link
+        if status.serial != serial:
+            return None, "serial_mismatch"
+        return status, None
+
+    async def _async_discard(self, token: Mapping[str, Any]) -> None:
+        """Revoke a token that won't be stored, so no unused grant is left behind.
+
+        Args:
+            token: The token response.
+        """
+        refresh_token = token.get("refresh_token")
+        if isinstance(refresh_token, str) and refresh_token:
+            await async_revoke_token(self.hass, refresh_token)

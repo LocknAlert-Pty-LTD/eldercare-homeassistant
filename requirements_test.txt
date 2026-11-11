@@ -1,0 +1,4 @@
+# Pins Home Assistant and its test harness together (2026.10.x)
+pytest-homeassistant-custom-component==0.13.375
+mypy==2.4.1
+ruff==0.17.4
